@@ -1,21 +1,80 @@
-name: browserRDP
-on: [push, workflow_dispatch]
+name: Secure RDP Access via ngrok
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Tunnel duration in minutes (max 360 - 6 hours)'
+        required: false
+        default: '360' # Set default to max allowed duration
+
 jobs:
   build:
     runs-on: windows-latest
+    # Maximum allowed duration for a public repository is 360 minutes (6 hours)
+    timeout-minutes: ${{ fromJSON(github.event.inputs.duration) || 360 }}
+
     steps:
-    - name: Download
-      run: Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
-    - name: Extract
-      run: Expand-Archive ngrok.zip
-    - name: Auth
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+    - name: Generate Secure Password
+      id: password_gen
+      shell: pwsh
+      run: |
+        # Generate a random, secure password
+        $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | % {[char]$_})
+        echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        echo "::add-mask::$password"
+
+    - name: Setup RDP User and Enable Remote Desktop
+      shell: pwsh
+      run: |
+        # Enable Remote Desktop
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+
+        # Create and set password for RDP user
+        $SecurePassword = ConvertTo-SecureString -String "$env:RDP_PASSWORD" -AsPlainText -Force
+        $User = New-LocalUser -Name "runneradmin" -Password $SecurePassword -FullName "RDP User" -Description "Temporary RDP User"
+        Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
+
+    - name: Download and Configure ngrok
+      shell: pwsh
+      run: |
+        Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+        Expand-Archive ngrok.zip -DestinationPath ngrok
+        .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
       env:
         NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-    - name: Enable TS
-      run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
-    - run: Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-    - run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-    - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
-    - name: Create Tunnel
-      run: .\ngrok\ngrok.exe tcp 3389
+
+    - name: Start ngrok Tunnel and Output Connection Details
+      shell: pwsh
+      run: |
+        # Start ngrok tunnel in the background
+        Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
+
+        # Wait for ngrok to establish the tunnel and get the public URL
+        Start-Sleep -Seconds 10
+        try {
+          $ngrok_api = Invoke-WebRequest -Uri "http://127.0.0.1:4040/api/tunnels" -UseBasicParsing
+          $ngrok_url = ($ngrok_api.Content | ConvertFrom-Json).tunnels[0].public_url
+        } catch {
+          echo "Error: Could not retrieve ngrok tunnel URL. The ngrok agent may have failed to start."
+          exit 1
+        }
+        
+        # Output connection details as a GitHub Actions Notice
+        echo "::notice title=RDP Connection Details::"
+        echo "RDP Address: $ngrok_url"
+        echo "Username: runneradmin"
+        echo "Password: $env:RDP_PASSWORD"
+        echo "::endnotice::"
+
+        # Keep the job alive for the specified duration
+        # The timeout-minutes will kill the job, but this sleep ensures the last step is running until then.
+        $duration_input = "${{ github.event.inputs.duration || 360 }}"
+        $duration = [int]($duration_input -replace '[^0-9]')
+        # Subtract a minute to allow for cleanup before the hard timeout
+        $sleep_seconds = ($duration - 1) * 60
+        echo "Keeping the tunnel alive for $duration minutes. Sleeping for $sleep_seconds seconds..."
+        Start-Sleep -Seconds $sleep_seconds
+        echo "Tunnel duration complete. Job finishing."
