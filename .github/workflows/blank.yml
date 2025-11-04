@@ -34,8 +34,8 @@ jobs:
 
         # Create and set password for RDP user
         $SecurePassword = ConvertTo-SecureString -String "$env:RDP_PASSWORD" -AsPlainText -Force
-        $User = New-LocalUser -Name "runneradmin" -Password $SecurePassword -FullName "RDP User" -Description "Temporary RDP User"
-        Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
+        $User = New-LocalUser -Name "adminrunner" -Password $SecurePassword -FullName "RDP User" -Description "Temporary RDP User"
+        Add-LocalGroupMember -Group "Administrators" -Member "adminrunner"
 
     - name: Download and Configure ngrok
       shell: pwsh
@@ -65,7 +65,7 @@ jobs:
         # Output connection details as a GitHub Actions Notice
         echo "::notice title=RDP Connection Details::"
         echo "RDP Address: $ngrok_url"
-        echo "Username: runneradmin"
+        echo "Username: adminrunner"
         echo "Password: $env:RDP_PASSWORD"
         echo "::endnotice::"
 
